@@ -4,31 +4,69 @@ Deploy isolated Grafana instances on OpenShift -- one per namespace. Each instan
 
 ## Architecture
 
-```
-                   ┌─────────────────────────────────────────────┐
-                   │          grafana-user1 namespace            │
-                   │                                             │
-  grafana-user1 ──►│  oauth-proxy ──► Grafana ──► nginx sidecar │
-  (namespace admin)│    (OpenShift     (auth.     (injects       │
-                   │     OAuth)         proxy)     namespace=     │
-  ybeder ──────────►│                             grafana-user1  │
-  (cluster-admin)  │                              + SA token)    │
-                   │                                  │          │
-                   └──────────────────────────────────┼──────────┘
-                                                      │
-                                                      ▼
-                                              Thanos Querier 9092
-                                             (tenancy-enforced)
-                                                      │
-                                                      ▼
-                                          User Workload Prometheus
-                                          (scrapes ServiceMonitors)
+### High-Level Overview
+
+```mermaid
+flowchart LR
+    subgraph users [Users]
+        nsAdmin["Namespace Admin"]
+        clusterAdmin["Cluster Admin"]
+    end
+
+    subgraph ocpCluster [OpenShift Cluster]
+        subgraph ns1 [grafana-user1 namespace]
+            subgraph pod1 [Grafana Pod]
+                oauthProxy1["oauth-proxy\n:9091 HTTPS"]
+                grafana1["Grafana\n:3000"]
+                nginx1["nginx sidecar\n:8080"]
+            end
+            sm1["ServiceMonitors\n+ Apps"]
+        end
+        subgraph ns2 [grafana-user2 namespace]
+            subgraph pod2 [Grafana Pod]
+                oauthProxy2["oauth-proxy\n:9091 HTTPS"]
+                grafana2["Grafana\n:3000"]
+                nginx2["nginx sidecar\n:8080"]
+            end
+            sm2["ServiceMonitors\n+ Apps"]
+        end
+        subgraph monitoring [openshift-monitoring]
+            thanos["Thanos Querier\n:9092 tenancy"]
+            uwProm["User Workload\nPrometheus"]
+        end
+    end
+
+    nsAdmin -->|OpenShift OAuth| oauthProxy1
+    clusterAdmin -->|OpenShift OAuth| oauthProxy1
+    clusterAdmin -->|OpenShift OAuth| oauthProxy2
+    oauthProxy1 -->|X-Forwarded-User| grafana1
+    oauthProxy2 -->|X-Forwarded-User| grafana2
+    grafana1 -->|"query"| nginx1
+    grafana2 -->|"query"| nginx2
+    nginx1 -->|"+ namespace=grafana-user1\n+ Bearer token"| thanos
+    nginx2 -->|"+ namespace=grafana-user2\n+ Bearer token"| thanos
+    thanos --- uwProm
+    uwProm -.->|scrape| sm1
+    uwProm -.->|scrape| sm2
 ```
 
-Each Grafana pod has three containers:
-1. **oauth-proxy** -- authenticates users via OpenShift OAuth; only users with access to the namespace can log in
-2. **grafana** -- the Grafana application, using `auth.proxy` to trust the oauth-proxy header
-3. **nginx sidecar** -- injects `namespace=<ns>` and `Authorization: Bearer <SA-token>` into every Prometheus query before forwarding to Thanos 9092
+### Pod Internal Flow
+
+```mermaid
+flowchart LR
+    browser["Browser"] -->|HTTPS :9091| oauth["oauth-proxy\n(OpenShift auth +\nnamespace SAR check)"]
+    oauth -->|"HTTP :3000\nX-Forwarded-User"| grafana["Grafana\n(auth.proxy mode)"]
+    grafana -->|"HTTP :8080\nGET /api/v1/query?query=..."| nginx["nginx sidecar"]
+    nginx -->|"HTTPS :9092\n+ namespace=my-ns\n+ Authorization: Bearer"| thanos["Thanos Querier\n(tenancy-enforced)"]
+```
+
+### Three containers per Grafana pod
+
+| Container | Port | Role |
+|---|---|---|
+| **oauth-proxy** | 9091 (HTTPS) | Authenticates users via OpenShift OAuth. Namespace-scoped SAR check ensures only users with access to the namespace can log in. |
+| **grafana** | 3000 (HTTP) | Grafana application using `auth.proxy` to trust the `X-Forwarded-User` header from oauth-proxy. All authenticated users get Grafana `Admin` role. |
+| **nginx sidecar** | 8080 (HTTP) | Injects `namespace=<ns>` query parameter and `Authorization: Bearer <SA-token>` header into every Prometheus request before forwarding to Thanos 9092. |
 
 ## Namespace Isolation
 
