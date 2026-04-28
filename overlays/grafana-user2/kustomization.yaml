@@ -1,0 +1,82 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: grafana-user2
+
+resources:
+  - ../../common/base/core
+  - ../../common/base/rbac
+  - ../../common/base/thanos-proxy
+
+patches:
+  # -- Grafana CR: set dashboards label and SAR namespace --
+  - target:
+      kind: Grafana
+      name: grafana
+    patch: |
+      - op: replace
+        path: /metadata/labels/dashboards
+        value: grafana-user2
+      - op: replace
+        path: /spec/deployment/spec/template/spec/containers/0/args/6
+        value: '-openshift-sar={"namespace": "grafana-user2", "resource": "pods", "verb": "get"}'
+      - op: replace
+        path: /spec/deployment/spec/template/spec/containers/0/args/7
+        value: '-openshift-delegate-urls={"/": {"namespace": "grafana-user2", "resource": "pods", "verb": "get"}}'
+
+  # -- GrafanaDatasource: set instanceSelector label --
+  - target:
+      kind: GrafanaDatasource
+      name: prometheus-thanos
+    patch: |
+      - op: replace
+        path: /spec/instanceSelector/matchLabels/dashboards
+        value: grafana-user2
+
+  # -- ClusterRoleBinding: grafana-oauth-proxy --
+  - target:
+      kind: ClusterRoleBinding
+      name: grafana-oauth-proxy-NAMESPACE
+    patch: |
+      - op: replace
+        path: /metadata/name
+        value: grafana-oauth-proxy-grafana-user2
+      - op: replace
+        path: /subjects/0/namespace
+        value: grafana-user2
+
+  # -- ClusterRoleBinding: auth-delegator --
+  - target:
+      kind: ClusterRoleBinding
+      name: auth-delegator-NAMESPACE
+    patch: |
+      - op: replace
+        path: /metadata/name
+        value: auth-delegator-grafana-user2
+      - op: replace
+        path: /subjects/0/namespace
+        value: grafana-user2
+
+  # -- ConfigMap: nginx namespace injection --
+  - target:
+      kind: ConfigMap
+      name: thanos-namespace-proxy
+    patch: |
+      - op: replace
+        path: /data/nginx.conf.template
+        value: |
+          worker_processes 1;
+          error_log /tmp/error.log warn;
+          pid /tmp/nginx.pid;
+          events { worker_connections 64; }
+          http {
+            server {
+              listen 8080;
+              location / {
+                set $args "$args&namespace=grafana-user2";
+                proxy_set_header Authorization "Bearer SA_TOKEN_PLACEHOLDER";
+                proxy_pass https://thanos-querier.openshift-monitoring.svc.cluster.local:9092;
+                proxy_ssl_verify off;
+              }
+            }
+          }

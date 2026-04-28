@@ -1,0 +1,143 @@
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: grafana
+  labels:
+    dashboards: NAMESPACE
+spec:
+  persistentVolumeClaim:
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 1Gi
+  client:
+    preferIngress: false
+  serviceAccount:
+    metadata:
+      annotations:
+        serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"grafana-route"}}'
+  route:
+    spec:
+      port:
+        targetPort: https
+      tls:
+        termination: reencrypt
+      to:
+        kind: Service
+        name: grafana-service
+        weight: 100
+      wildcardPolicy: None
+  service:
+    metadata:
+      annotations:
+        service.beta.openshift.io/serving-cert-secret-name: grafana-tls
+    spec:
+      ports:
+        - name: https
+          port: 9091
+          protocol: TCP
+          targetPort: https
+  deployment:
+    spec:
+      template:
+        spec:
+          volumes:
+            - name: grafana-tls
+              secret:
+                secretName: grafana-tls
+            - name: grafana-proxy
+              secret:
+                secretName: grafana-proxy
+            - name: ocp-injected-certs
+              configMap:
+                name: ocp-injected-certs
+            - name: grafana-data
+              persistentVolumeClaim:
+                claimName: grafana-pvc
+            - name: thanos-proxy-config
+              configMap:
+                name: thanos-namespace-proxy
+          containers:
+            - name: grafana-proxy
+              image: registry.redhat.io/openshift4/ose-oauth-proxy-rhel9:v4.20
+              args:
+                - -provider=openshift
+                - -pass-basic-auth=false
+                - -https-address=:9091
+                - -http-address=
+                - -email-domain=*
+                - -upstream=http://localhost:3000
+                - '-openshift-sar={"namespace": "NAMESPACE", "resource": "pods", "verb": "get"}'
+                - '-openshift-delegate-urls={"/": {"namespace": "NAMESPACE", "resource": "pods", "verb": "get"}}'
+                - -tls-cert=/etc/tls/private/tls.crt
+                - -tls-key=/etc/tls/private/tls.key
+                - -client-secret-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+                - -cookie-secret-file=/etc/proxy/secrets/session_secret
+                - -openshift-service-account=grafana-sa
+                - -openshift-ca=/etc/pki/tls/cert.pem
+                - -openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                - -openshift-ca=/etc/proxy/certs/ca-bundle.crt
+                - -skip-auth-regex=^/metrics
+              ports:
+                - containerPort: 9091
+                  name: https
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - mountPath: /etc/tls/private
+                  name: grafana-tls
+                  readOnly: true
+                - mountPath: /etc/proxy/secrets
+                  name: grafana-proxy
+                  readOnly: true
+                - mountPath: /etc/proxy/certs
+                  name: ocp-injected-certs
+                  readOnly: true
+            - name: thanos-proxy
+              image: registry.access.redhat.com/ubi9/nginx-124:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  sed "s|SA_TOKEN_PLACEHOLDER|${TOKEN}|g" /etc/nginx-custom/nginx.conf.template > /tmp/nginx.conf
+                  exec nginx -c /tmp/nginx.conf -g 'daemon off;'
+              ports:
+                - containerPort: 8080
+                  name: thanos-proxy
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 50m
+                  memory: 64Mi
+              volumeMounts:
+                - mountPath: /etc/nginx-custom
+                  name: thanos-proxy-config
+                  readOnly: true
+  config:
+    log:
+      mode: console
+    auth:
+      disable_login_form: "False"
+      disable_signout_menu: "True"
+    auth.anonymous:
+      enabled: "True"
+    auth.basic:
+      enabled: "True"
+    auth.proxy:
+      enabled: "True"
+      enable_login_token: "True"
+      header_name: X-Forwarded-User
+      header_property: username
+    users:
+      auto_assign_org: "true"
+      auto_assign_org_id: "1"
+      auto_assign_org_role: Admin

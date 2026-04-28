@@ -1,0 +1,19 @@
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: prometheus-thanos
+spec:
+  datasource:
+    access: proxy
+    editable: false
+    isDefault: true
+    jsonData:
+      httpMethod: GET
+      timeInterval: 5s
+    name: Prometheus
+    type: prometheus
+    url: "http://localhost:8080"
+  instanceSelector:
+    matchLabels:
+      dashboards: NAMESPACE
